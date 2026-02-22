@@ -5,38 +5,8 @@ from queue import PriorityQueue
 import regex as re
 from dataclasses import dataclass, field
 from .pretokenization_example import find_chunk_boundaries
-
-class WordStrNode:
-  byte_pair: bytes
-  prev: WordStrNode | None = None
-  next: WordStrNode | None = None
-  dummy_head: bool = False
-
-  def __init__(self, byte_pair: bytes, dummy_head: bool = False):
-    self.byte_pair = byte_pair
-    self.prev = None
-    self.next = None
-    self.dummy_head = dummy_head
-  
-  def _remove_myself(self):
-    if self.prev is not None:
-      self.prev.next = self.next
-    if self.next is not None:
-      self.next.prev = self.prev
-
-  def _valid(self) -> bool:
-    return self.prev is not None and self.dummy_head == False
-
-  def _set_byte_pair(self, byte_pair: bytes):
-    self.byte_pair = byte_pair
-
-  def _link_next(self, next_node: WordStrNode):
-    self.next = next_node
-    next_node.prev = self
-
-  def _link_prev(self, prev_node: WordStrNode):
-    self.prev = prev_node
-    prev_node.next = self
+from .pre_tokenization import pre_tokenize_string
+from .word_node import WordStrNode
 
 @dataclass(order=False)
 class PrioritizedItem:
@@ -55,87 +25,42 @@ class PrioritizedItem:
         # So we say self is "smaller" if self.pair is LARGER.
         return self.pair > other.pair
 
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-
-def _pre_tokenize_chunk(input_path: str, start: int, end: int, special_tokens: list[str]) -> tuple[dict[str, int], dict[tuple[bytes, bytes], int], dict[tuple[bytes, bytes], list[str]]]:
+def _pre_tokenize_chunk(input_path: str, start: int, end: int, special_tokens: list[str]) -> dict[str, int]:
     """Pre-tokenize a string into frequency dictionaries.
     Returns:
         local_word_freqs: dict[str, int] - word frequencies
-        local_token_freqs: dict[tuple[bytes, bytes], int] - byte pair frequencies
-        local_byte_pair2words: dict[tuple[bytes, bytes], list[str]] - mapping from byte pair to words
     """
     with open(input_path, "rb") as f:
       f.seek(start)
       chunk = f.read(end - start).decode("utf-8", errors="ignore")
 
-    special_tokens_set = set(special_tokens)
     local_word_freqs = {}
-    local_token_freqs = {}
-    local_byte_pair2words = {}
-
-    def _process_tokens(tokens):
-        for token in tokens:
-            # 1. Word frequency
-            local_word_freqs[token] = local_word_freqs.get(token, 0) + 1
+    tokens = pre_tokenize_string(chunk, special_tokens)
+    
+    for token in tokens:
+        local_word_freqs[token] = local_word_freqs.get(token, 0) + 1
             
-            # 2. Token (byte pair) frequency and mapping
-            word_bytes = token.encode("utf-8")
-            if len(word_bytes) < 2:
-                continue
-                
-            for i in range(len(word_bytes) - 1):
-                byte_pair = (word_bytes[i:i+1], word_bytes[i+1:i+2])
-                local_token_freqs[byte_pair] = local_token_freqs.get(byte_pair, 0) + 1
-                
-                if byte_pair not in local_byte_pair2words:
-                    local_byte_pair2words[byte_pair] = []
-                # According to user, duplication is fine/expected if multiple occurrences
-                local_byte_pair2words[byte_pair].append(token)
+    return local_word_freqs
 
-    if not special_tokens:
-        tokens = re.findall(PAT, chunk)
-        _process_tokens(tokens)
-    else:
-        special_pattern = "(" + "|".join(f"(?: ?{re.escape(t)})" for t in special_tokens) + ")"
-        parts = re.split(special_pattern, chunk)
-        
-        for part in parts:
-            if not part:
-                continue
-            stripped_part = part.lstrip(" ")
-            if stripped_part in special_tokens_set:
-                continue
-            else:
-                tokens = re.findall(PAT, part)
-                _process_tokens(tokens)
-            
-    return local_word_freqs, local_token_freqs, local_byte_pair2words
-
-def build_byte_pair_node(word_bytes: bytes) -> WordStrNode:
+def build_byte_pair_node(word_bytes: bytes, word: str, freq: int, byte_pair2nodes: dict, token_freqs: dict) -> WordStrNode:
   root = WordStrNode(b"", dummy_head=True)
   curr = root
   for i in range(len(word_bytes)):
     byte_pair = word_bytes[i:i+1]
     next_node = WordStrNode(byte_pair)
     curr._link_next(next_node)
-    next_node._link_prev(curr)
+    
+    # Register pair if not dummy head
+    if not curr.dummy_head:
+        pair = (curr.byte_pair, next_node.byte_pair)
+        if pair not in byte_pair2nodes:
+            byte_pair2nodes[pair] = []
+        byte_pair2nodes[pair].append((curr, word))
+        token_freqs[pair] = token_freqs.get(pair, 0) + freq
+        
     curr = next_node
   return root
-
-def find_neighbor_byte(two_byte_pair: tuple[bytes, bytes], node: WordStrNode) -> tuple[WordStrNode, WordStrNode, WordStrNode, WordStrNode]:
-  """
-  Find the neighbor byte-pair of the given byte-pair in the linked list.
-  """
-  assert node.dummy_head == True, "Node must be dummy head"
-  first_pair = two_byte_pair[0]
-  second_pair = two_byte_pair[1]
-  curr = node
-  while curr.next is not None and curr.next.next is not None:
-    if curr.next.byte_pair == first_pair and curr.next.next.byte_pair == second_pair:
-      return curr, curr.next, curr.next.next, curr.next.next.next
-    curr = curr.next
-  return None, None, None, None
 
 class BPE:
     def __init__(self, input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]):
@@ -145,7 +70,7 @@ class BPE:
         
         # State variables
         self.token_freqs = {}
-        self.byte_pair2words = {}
+        self.byte_pair2nodes = {}
         self.word2freqs = {}
         self.word2node = {}
         self.vocab = {}
@@ -171,25 +96,21 @@ class BPE:
             results = pool.starmap(_pre_tokenize_chunk, tasks)
         
         # Merge results from all chunks
-        for local_word_freqs, local_token_freqs, local_byte_pair2words in results:
+        for local_word_freqs in results:
             # 1. Merge word frequencies
             for word, freq in local_word_freqs.items():
                 self.word2freqs[word] = self.word2freqs.get(word, 0) + freq
-            
-            # 2. Merge token frequencies
-            for bp, freq in local_token_freqs.items():
-                self.token_freqs[bp] = self.token_freqs.get(bp, 0) + freq
-                
-            # 3. Merge byte_pair2words
-            for bp, words in local_byte_pair2words.items():
-                if bp not in self.byte_pair2words:
-                    self.byte_pair2words[bp] = []
-                self.byte_pair2words[bp].extend(words)
 
-        # 4. Build word nodes (still needed for linked list operations)
+        # 2. Build word nodes and indices
         # We only need to build nodes for UNIQUE words found
-        for word in self.word2freqs:
-             self.word2node[word] = build_byte_pair_node(word.encode("utf-8"))
+        for word, freq in self.word2freqs.items():
+             self.word2node[word] = build_byte_pair_node(
+                 word.encode("utf-8"), 
+                 word,
+                 freq, 
+                 self.byte_pair2nodes, 
+                 self.token_freqs
+             )
 
     def _initialize_vocab(self):
         """
@@ -217,30 +138,38 @@ class BPE:
         # Use a dict to accumulate changes: pair -> delta
         freq_deltas = {}
 
-        for word in self.byte_pair2words[two_byte_pair]:
-            pre_node, first_node, second_node, next_node = find_neighbor_byte(two_byte_pair, self.word2node[word])
-            # If the node has already been merged (e.g. in overlapping pairs like '000' -> '00', '0'),
-            # the structure is changed. We skip if first_node is None.
-            if first_node is None:
+        # Get the list of nodes that start with this pair
+        nodes_to_process = self.byte_pair2nodes.get(two_byte_pair, [])
+
+        for first_node, word in nodes_to_process:
+            # Validate that the node still represents the pair we are merging
+            # It might have been invalidated by a previous merge in this loop or a neighbor merge
+            # Check _valid() because we clear pointers in _remove_myself now
+            # consider case like '000', there is two bytes-pair '0','0'
+            if (first_node.byte_pair != first_pair or 
+                not first_node._valid() or
+                first_node.next is None or 
+                first_node.next.byte_pair != second_pair):
                 continue
+
+            second_node = first_node.next
+            pre_node = first_node.prev
+            next_node = second_node.next
             
-            # pre_node at least is dummy head
-            assert pre_node is not None
-            
+            # Use the frequency from word2freqs
             word_freq = self.word2freqs[word]
             
             # Decrement the frequency of the pair being merged
-            # because this instance of the pair is now consumed
             freq_deltas[two_byte_pair] = freq_deltas.get(two_byte_pair, 0) - word_freq
 
             if pre_node is not None and pre_node._valid():
                 pre_byte_pair = (pre_node.byte_pair, merged_pair)
                 old_pre_pair = (pre_node.byte_pair, first_pair)
                 
-                # Update byte_pair2words for new pair
-                if pre_byte_pair not in self.byte_pair2words:
-                    self.byte_pair2words[pre_byte_pair] = []
-                self.byte_pair2words[pre_byte_pair].append(word)
+                # Update byte_pair2nodes for new pair
+                if pre_byte_pair not in self.byte_pair2nodes:
+                    self.byte_pair2nodes[pre_byte_pair] = []
+                self.byte_pair2nodes[pre_byte_pair].append((pre_node, word))
                 
                 # Accumulate freq changes
                 freq_deltas[pre_byte_pair] = freq_deltas.get(pre_byte_pair, 0) + word_freq
@@ -250,10 +179,10 @@ class BPE:
                 next_byte_pair = (merged_pair, next_node.byte_pair)
                 old_next_pair = (second_pair, next_node.byte_pair)
                 
-                # Update byte_pair2words for new pair
-                if next_byte_pair not in self.byte_pair2words:
-                    self.byte_pair2words[next_byte_pair] = []
-                self.byte_pair2words[next_byte_pair].append(word)
+                # Update byte_pair2nodes for new pair
+                if next_byte_pair not in self.byte_pair2nodes:
+                    self.byte_pair2nodes[next_byte_pair] = []
+                self.byte_pair2nodes[next_byte_pair].append((first_node, word))
 
                 # Accumulate freq changes
                 freq_deltas[next_byte_pair] = freq_deltas.get(next_byte_pair, 0) + word_freq
@@ -261,6 +190,10 @@ class BPE:
           
             first_node._set_byte_pair(merged_pair)
             second_node._remove_myself()
+
+        # Clean up memory for the merged pair
+        if two_byte_pair in self.byte_pair2nodes:
+            del self.byte_pair2nodes[two_byte_pair]
 
         # Apply frequency changes and update PQ
         for pair, delta in freq_deltas.items():
