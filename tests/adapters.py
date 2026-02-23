@@ -9,7 +9,10 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.tokenizer import train_bpe
-
+from cs336_basics.transformer.linear import Linear
+from cs336_basics.transformer.embedding import Embedding
+from cs336_basics.transformer.rmsnorm import RMSNorm
+from cs336_basics.transformer.positionwise_feedforward import SwiGLU
 
 def run_linear(
     d_in: int,
@@ -29,8 +32,10 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"weight": weights})
+    return linear(in_features)
 
-    raise NotImplementedError
 
 
 def run_embedding(
@@ -51,8 +56,9 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_state_dict({"weight": weights})
+    return embedding(token_ids)
 
 
 def run_swiglu(
@@ -84,6 +90,27 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
+    swiglu = SwiGLU(d_model, d_ff)
+    swiglu.load_state_dict({"weight1": w1_weight, "weight2": w2_weight, "weight3": w3_weight})
+    return swiglu(in_features)
+
+
+def run_rmsnorm(
+    d_model: int,
+    weights: Float[Tensor, " d_model"],
+    in_features: Float[Tensor, " ... d_model"],
+) -> Float[Tensor, " ... d_model"]:
+    """
+    Given the weights of an RMSNorm layer, return the output of your RMSNorm layer.
+
+    Args:
+        d_model (int): Dimensionality of the feedforward input and output.
+        weights (Float[Tensor, "d_model"]): Stored weights for RMSNorm
+        in_features (Float[Tensor, "... d_model"]): Input embeddings to the feed-forward layer.
+
+    Returns:
+        Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
+    """
     raise NotImplementedError
 
 
@@ -288,7 +315,7 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
-    """Given the weights of a Transformer language model and input indices,
+    r"""Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 
     This function should use RoPE.
@@ -379,7 +406,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.weight = torch.nn.Parameter(weights)
+    return rmsnorm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
