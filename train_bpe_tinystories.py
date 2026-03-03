@@ -44,8 +44,8 @@ def encode_and_save(tokenizer, input_path, output_path):
     print(f"Saved {total_tokens} tokens to {output_path}")
 
 def main():
-    train_path = "TinyStories-train.txt"
-    valid_path = "TinyStories-valid.txt"
+    train_path = "data/TinyStoriesV2-GPT4-train.txt"
+    valid_path = "data/TinyStoriesV2-GPT4-valid.txt"
     
     # 1. Train BPE on validation set
     print(f"Training BPE on {valid_path}...")
