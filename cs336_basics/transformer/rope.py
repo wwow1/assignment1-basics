@@ -8,7 +8,7 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         self.max_seq_len = max_seq_len
         self.device = device
         # to different k, we need to compute different theta_base
-        theta_base = 1.0 / theta ** (torch.arange(0, d_k, 2).float() / d_k)
+        theta_base = 1.0 / (theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
         position = torch.arange(0, max_seq_len, device=device).float()
 
         # (seq_len, d_k)
@@ -55,10 +55,14 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # R shape: (1, ..., 1, s, h, 2, 2)  <- broadcasting happens on 1s
         # x shape: (b, ..., h, s, h, 2)
         #
-        # Formula: x_out[..., s, h, i] = sum_j (R[..., s, h, i, j] * x[..., s, h, j])
-        x_out = torch.einsum("... s h i j, ... s h j -> ... s h i", R, x_reshaped)
+        # 5. Apply rotation using einsum
+        # Add head dimension to R for broadcasting: (..., 1, seq_len, d_k // 2, 2, 2)
+        R = R.unsqueeze(-5)
         
-        # 5. Flatten back to original shape
+        # Formula: x_out[..., h, s, d, i] = sum_j (R[..., 1, s, d, i, j] * x[..., h, s, d, j])
+        x_out = torch.einsum("... h s d i j, ... h s d j -> ... h s d i", R, x_reshaped)
+        
+        # 6. Flatten back to original shape
         # (..., seq_len, d_k // 2, 2) -> (..., seq_len, d_k)
         return x_out.flatten(-2)
 

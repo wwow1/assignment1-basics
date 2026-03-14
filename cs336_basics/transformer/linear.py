@@ -16,5 +16,6 @@ class Linear(torch.nn.Module):
         std = math.sqrt(2 / (in_features + out_features))
         torch.nn.init.trunc_normal_(self.weight, mean = 0, std = std, a = -3 * std, b = 3 * std)
 
+    # Transfer x from (batch_size, context_length, embedding_dim) to (batch_size, context_length, out_features)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.weight.T
